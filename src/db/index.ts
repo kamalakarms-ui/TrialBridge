@@ -1,8 +1,44 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { Signer } from "@aws-sdk/rds-signer";
 import { awsCredentialsProvider } from "@vercel/functions/oidc";
 import * as schema from "./schema";
+
+// Temporary fallback: a manually supplied, pre-signed RDS IAM auth token.
+// Used only when OIDC-based role assumption is unavailable (e.g. trust-policy
+// not yet propagated). Safe to remove once OIDC auth works end-to-end.
+const TOKEN_FILE = join(process.cwd(), ".rds-token");
+
+function readManualToken(): string | null {
+  try {
+    if (!existsSync(TOKEN_FILE)) return null;
+    const value = readFileSync(TOKEN_FILE, "utf8").trim();
+    if (value.length === 0) return null;
+
+    // RDS auth tokens carry X-Amz-Date and X-Amz-Expires (seconds). Once
+    // expired, return null so we fall back to OIDC-based signing instead of
+    // handing Postgres a dead credential.
+    const params = new URLSearchParams(value.split("?")[1] ?? "");
+    const date = params.get("X-Amz-Date");
+    const expires = Number(params.get("X-Amz-Expires") ?? "0");
+    if (date && expires) {
+      const m = date.match(
+        /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,
+      );
+      if (m) {
+        const [, y, mo, d, h, mi, s] = m;
+        const issued = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
+        if (Date.now() > issued + expires * 1000) return null;
+      }
+    }
+    return value;
+  } catch {
+    // ignore and fall back to the signer
+  }
+  return null;
+}
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -39,7 +75,7 @@ function createPool(): Pool {
     database: process.env.PGDATABASE || "postgres",
     port,
     user,
-    password: () => signer.getAuthToken(),
+    password: () => readManualToken() ?? signer.getAuthToken(),
     ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 20_000,
@@ -65,6 +101,18 @@ export function getPool(): Pool {
   const pool = createPool();
   globalForDb.pool = pool;
   return pool;
+}
+
+export async function resetDb(): Promise<void> {
+  if (globalForDb.pool) {
+    try {
+      await globalForDb.pool.end();
+    } catch {
+      // ignore
+    }
+  }
+  globalForDb.pool = undefined;
+  globalForDb.db = undefined;
 }
 
 export const db = new Proxy({} as Db, {
