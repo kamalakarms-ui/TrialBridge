@@ -1,39 +1,70 @@
-import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import { Signer } from "@aws-sdk/rds-signer";
+import { awsCredentialsProvider } from "@vercel/functions/oidc";
 import * as schema from "./schema";
 
-type Db = PostgresJsDatabase<typeof schema>;
+type Db = NodePgDatabase<typeof schema>;
 
 const globalForDb = globalThis as unknown as {
-  client: ReturnType<typeof postgres> | undefined;
+  pool: Pool | undefined;
   db: Db | undefined;
 };
+
+function createPool(): Pool {
+  const host = process.env.PGHOST;
+  if (!host) {
+    throw new Error(
+      "PGHOST environment variable is not set. Connect the Amazon Aurora PostgreSQL integration.",
+    );
+  }
+
+  const region = process.env.AWS_REGION;
+  const user = process.env.PGUSER || "postgres";
+  const port = process.env.PGPORT ? Number(process.env.PGPORT) : 5432;
+
+  const signer = new Signer({
+    credentials: awsCredentialsProvider({
+      roleArn: process.env.AWS_ROLE_ARN!,
+      clientConfig: { region },
+    }),
+    region,
+    hostname: host,
+    username: user,
+    port,
+  });
+
+  return new Pool({
+    host,
+    database: process.env.PGDATABASE || "postgres",
+    port,
+    user,
+    password: () => signer.getAuthToken(),
+    ssl: { rejectUnauthorized: false },
+    max: 10,
+    idleTimeoutMillis: 20_000,
+    connectionTimeoutMillis: 10_000,
+  });
+}
 
 function getDb(): Db {
   if (globalForDb.db) return globalForDb.db;
 
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL environment variable is not set. See .env.example for setup.",
-    );
-  }
-
-  const client =
-    globalForDb.client ??
-    postgres(connectionString, {
-      max: 10,
-      idle_timeout: 20,
-      connect_timeout: 10,
-    });
-
+  const pool = globalForDb.pool ?? createPool();
   if (process.env.NODE_ENV !== "production") {
-    globalForDb.client = client;
+    globalForDb.pool = pool;
   }
 
-  const database = drizzle(client, { schema });
+  const database = drizzle(pool, { schema });
   globalForDb.db = database;
   return database;
+}
+
+export function getPool(): Pool {
+  if (globalForDb.pool) return globalForDb.pool;
+  const pool = createPool();
+  globalForDb.pool = pool;
+  return pool;
 }
 
 export const db = new Proxy({} as Db, {
