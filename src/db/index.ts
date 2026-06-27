@@ -1,44 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { Signer } from "@aws-sdk/rds-signer";
 import { awsCredentialsProvider } from "@vercel/functions/oidc";
 import * as schema from "./schema";
-
-// Temporary fallback: a manually supplied, pre-signed RDS IAM auth token.
-// Used only when OIDC-based role assumption is unavailable (e.g. trust-policy
-// not yet propagated). Safe to remove once OIDC auth works end-to-end.
-const TOKEN_FILE = join(process.cwd(), ".rds-token");
-
-function readManualToken(): string | null {
-  try {
-    if (!existsSync(TOKEN_FILE)) return null;
-    const value = readFileSync(TOKEN_FILE, "utf8").trim();
-    if (value.length === 0) return null;
-
-    // RDS auth tokens carry X-Amz-Date and X-Amz-Expires (seconds). Once
-    // expired, return null so we fall back to OIDC-based signing instead of
-    // handing Postgres a dead credential.
-    const params = new URLSearchParams(value.split("?")[1] ?? "");
-    const date = params.get("X-Amz-Date");
-    const expires = Number(params.get("X-Amz-Expires") ?? "0");
-    if (date && expires) {
-      const m = date.match(
-        /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,
-      );
-      if (m) {
-        const [, y, mo, d, h, mi, s] = m;
-        const issued = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
-        if (Date.now() > issued + expires * 1000) return null;
-      }
-    }
-    return value;
-  } catch {
-    // ignore and fall back to the signer
-  }
-  return null;
-}
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -47,21 +11,30 @@ const globalForDb = globalThis as unknown as {
   db: Db | undefined;
 };
 
-function createPool(): Pool {
-  const host = process.env.PGHOST;
-  if (!host) {
-    throw new Error(
-      "PGHOST environment variable is not set. Connect the Amazon Aurora PostgreSQL integration.",
-    );
-  }
+// Connection target for the active Aurora PostgreSQL cluster.
+// These are non-secret identifiers (role ARN, region, host, user, db, port);
+// the only sensitive credential is the IAM auth token, which is generated at
+// runtime via OIDC. DB_*-prefixed env vars take precedence so the values can
+// be overridden without colliding with the integration-managed PG*/AWS_* vars.
+const DB_CONFIG = {
+  roleArn:
+    process.env.DB_AWS_ROLE_ARN ||
+    "arn:aws:iam::802705728661:role/vercel-trialbridge-db",
+  region: process.env.DB_AWS_REGION || "us-east-1",
+  host:
+    process.env.DB_PGHOST ||
+    "trialbridge-cluster.cluster-cs7ymoqccnfp.us-east-1.rds.amazonaws.com",
+  user: process.env.DB_PGUSER || "app_user",
+  database: process.env.DB_PGDATABASE || "trialbridge",
+  port: process.env.DB_PGPORT ? Number(process.env.DB_PGPORT) : 5432,
+};
 
-  const region = process.env.AWS_REGION;
-  const user = process.env.PGUSER || "postgres";
-  const port = process.env.PGPORT ? Number(process.env.PGPORT) : 5432;
+function createPool(): Pool {
+  const { roleArn, region, host, user, database, port } = DB_CONFIG;
 
   const signer = new Signer({
     credentials: awsCredentialsProvider({
-      roleArn: process.env.AWS_ROLE_ARN!,
+      roleArn,
       clientConfig: { region },
     }),
     region,
@@ -72,10 +45,10 @@ function createPool(): Pool {
 
   return new Pool({
     host,
-    database: process.env.PGDATABASE || "postgres",
+    database,
     port,
     user,
-    password: () => readManualToken() ?? signer.getAuthToken(),
+    password: () => signer.getAuthToken(),
     ssl: { rejectUnauthorized: false },
     max: 10,
     idleTimeoutMillis: 20_000,
