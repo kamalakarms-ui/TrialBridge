@@ -18,7 +18,7 @@ import {
   type PatientProfile,
 } from "@/lib/matching/engine";
 
-async function seed() {
+export async function seedDatabase() {
   console.log("🌱 Seeding TrialBridge AI database...");
 
   await db.delete(auditEvents);
@@ -407,10 +407,13 @@ async function seed() {
   console.log(`   Criteria: ${insertedCriteria.length}`);
   console.log(`   Patients: ${insertedPatients.length}`);
   console.log(`   Labs: ${labData.length}`);
-  process.exit(0);
-}
 
-seed().catch((err) => {
-  console.error("❌ Seed failed:", err);
-  process.exit(1);
-});
+  return {
+    organization: org.name,
+    users: 2,
+    trials: insertedTrials.length,
+    criteria: insertedCriteria.length,
+    patients: insertedPatients.length,
+    labs: labData.length,
+  };
+}
