@@ -530,6 +530,7 @@ export async function getDashboardMetrics() {
   const recentMatches = await db
     .select({
       match: trialMatches,
+      patientId: syntheticPatients.id,
       patientCode: syntheticPatients.patientCode,
       trialTitle: trials.title,
     })

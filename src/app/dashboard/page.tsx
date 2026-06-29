@@ -94,9 +94,11 @@ export default async function DashboardPage() {
             ) : (
               <div className="space-y-3">
                 {metrics.recentMatches.map((item) => (
-                  <div
+                  <Link
                     key={item.match.id}
-                    className="flex items-center justify-between rounded-lg border border-slate-100 p-3"
+                    href={`/patients/${item.patientId}/matches`}
+                    aria-label={`View match breakdown for ${item.patientCode} — ${item.trialTitle}`}
+                    className="flex items-center justify-between rounded-lg border border-slate-100 p-3 transition-colors hover:border-teal-200 hover:bg-teal-50/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
                   >
                     <div>
                       <p className="text-sm font-medium text-slate-900">
@@ -111,8 +113,12 @@ export default async function DashboardPage() {
                       <span className="text-sm font-semibold text-slate-700">
                         {Math.round(item.match.score)}%
                       </span>
+                      <span className="flex items-center gap-1 text-xs font-medium text-teal-700">
+                        View breakdown
+                        <ArrowRight className="h-3 w-3" />
+                      </span>
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             )}
